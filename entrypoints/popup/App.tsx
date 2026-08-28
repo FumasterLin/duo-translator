@@ -76,7 +76,11 @@ export default function App() {
   // resolved value picks the sun/moon button icon (system follows the OS).
   const themeSetting = useThemeSetting();
   const resolvedTheme = useResolvedTheme();
-  let tabId: number | undefined
+  // A ref, not a `let` in the component body: the onMessage listener closes
+  // over the FIRST render's binding, which only worked because the hydrate
+  // effect happened to assign through that same closure. A ref states the
+  // intent and survives any future refactor of either effect.
+  const tabIdRef = useRef<number | undefined>(undefined);
 
   // Close the "More" menu when clicking outside of it.
   useEffect(() => {
@@ -116,8 +120,8 @@ export default function App() {
     let cancelled = false;
     const listener = (message: any, sender: Browser.runtime.MessageSender, sendResponse: (response?: any) => void) => {
       if (message.action === TRANSLATE_ACTION.TRANSLATE_STATUS_CHANGED) {
-        console.log("receive message:", message, tabId)
-        if (tabId !== undefined && message.data.tabId === tabId && typeof message.data.status === 'boolean') {
+        console.log("receive message:", message, tabIdRef.current)
+        if (tabIdRef.current !== undefined && message.data.tabId === tabIdRef.current && typeof message.data.status === 'boolean') {
           setTranslateActive(message.data.status)
         }
       }
@@ -138,7 +142,7 @@ export default function App() {
         sendMessageToBackground({ action: TAB_ACTION.TAB_DOMAIN_GET }),
         sendMessageToBackground({ action: TAB_ACTION.ID_GET }),
       ]);
-      tabId = id
+      tabIdRef.current = id
       let { activeService, enabledTranslateServices, enabledAiProviders, aiUsedForTranslatePage } = await getTranslateService(ts);
 
       if (cancelled) return;

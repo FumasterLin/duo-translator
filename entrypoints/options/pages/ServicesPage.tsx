@@ -291,13 +291,18 @@ export function ServicesPage() {
                 alert(t('keepAtLeastOneTranslationService', 'Keep at least one translation service'));
                 return;
             }
-            // const current = (await getConfig(CONFIG_KEY.TRANSLATE_SERVICE)) as string | undefined;
-            // if (current && current.includes(row.value)) {
-            //     alert(
-            //         t('useTranslationServiceCannotBeDisabled', 'The translation service in use cannot be disabled'),
-            //     );
-            //     return;
-            // }
+            // Disabling the service that is ACTIVELY selected must not be
+            // allowed: resolveService falls back to another enabled provider,
+            // and the user would silently get translations from a provider
+            // they never chose. (This guard existed, was commented out, and
+            // the silent-fallback behavior shipped with it.)
+            const current = (await getConfig(CONFIG_KEY.TRANSLATE_SERVICE)) as string | undefined;
+            if (current && (current === row.value || current.startsWith(`${row.value}:`))) {
+                alert(
+                    t('useTranslationServiceCannotBeDisabled', 'The translation service in use cannot be disabled'),
+                );
+                return;
+            }
         }
 
         const nextDisabled = new Set(disabled);

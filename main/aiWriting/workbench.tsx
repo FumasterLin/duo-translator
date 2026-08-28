@@ -150,6 +150,11 @@ function WorkbenchApp({ registerOpen }: { registerOpen: (fn: (s: WorkbenchSeed) 
     const [enhanceProviderId, setEnhanceProviderId] = useState<string>("");
     const targetRef = useRef<HTMLElement | null>(null);
     const abortRef = useRef<(() => void) | null>(null);
+    // Run-token: an aborted predecessor's `finally` lands as a microtask AFTER
+    // this run has set its own abortRef/running state — without the guard it
+    // would clear the NEW run's abort (Stop stops working once) and flip
+    // `running` off mid-stream. Same pattern as selectionPopup's myAbort.
+    const runIdRef = useRef(0);
     const dialogRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
@@ -241,6 +246,7 @@ function WorkbenchApp({ registerOpen }: { registerOpen: (fn: (s: WorkbenchSeed) 
             });
         }
         setRunning(true);
+        const myRun = ++runIdRef.current;
         const { stream, abort } = running$;
         abortRef.current = abort;
         try {
@@ -248,7 +254,7 @@ function WorkbenchApp({ registerOpen }: { registerOpen: (fn: (s: WorkbenchSeed) 
                 setOutput((prev) => prev + delta);
             }
         } catch (e: any) {
-            setError(e?.message || String(e));
+            if (runIdRef.current === myRun) setError(e?.message || String(e));
             // `silent`: the workbench renders `error` in its own body. Console
             // only, so the reason survives closing the modal.
             reportRequestError(ERROR_SCOPE.AI_WRITING, e, {
@@ -261,6 +267,7 @@ function WorkbenchApp({ registerOpen }: { registerOpen: (fn: (s: WorkbenchSeed) 
                 },
             });
         } finally {
+            if (runIdRef.current !== myRun) return;
             setRunning(false);
             abortRef.current = null;
         }

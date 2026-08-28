@@ -186,6 +186,12 @@ function FloatingDotApp({ domain, taskMode }: { domain: string, taskMode: AI_TAS
     const hideTimer = useRef<number | null>(null);
     const expandTimer = useRef<number | null>(null);
     const abortRef = useRef<(() => void) | null>(null);
+    // Run-token guarding the finally of runTranslate/runEnhance: an aborted
+    // predecessor's cleanup lands as a microtask after the next run has
+    // already set its own abortRef — without the guard it would clear the NEW
+    // run's abort (its Stop button stops working once). Same pattern as
+    // selectionPopup's myAbort and workbench's runIdRef.
+    const runIdRef = useRef(0);
     // Mirror of `target` state for read-only access from long-lived callbacks
     // (focus tracker, hide-timer) that must NOT be in effect deps — otherwise
     // the tracker is torn down and rebuilt on every focus change, losing its
@@ -196,6 +202,12 @@ function FloatingDotApp({ domain, taskMode }: { domain: string, taskMode: AI_TAS
     const settingsOpenRef = useRef(false);
     const closeMenuOpenRef = useRef(false);
     const resultRef = useRef<ResultPanel>(null);
+    // Unmount hygiene: a pending hide/expand timer firing after unmount would
+    // setState on a dead root (silent in React 18, but a trap for refactors).
+    useEffect(() => () => {
+        if (hideTimer.current !== null) clearTimeout(hideTimer.current);
+        if (expandTimer.current !== null) clearTimeout(expandTimer.current);
+    }, []);
     settingsOpenRef.current = settingsOpen;
     closeMenuOpenRef.current = closeMenuOpen;
     resultRef.current = result;
@@ -433,6 +445,7 @@ function FloatingDotApp({ domain, taskMode }: { domain: string, taskMode: AI_TAS
             serviceKey: buildTranslateServiceKey(choice),
         });
         const { stream, abort } = startTranslate(original, lang, choice);
+        const myRun = ++runIdRef.current;
         abortRef.current = abort;
         try {
             for await (const delta of stream) {
@@ -450,7 +463,7 @@ function FloatingDotApp({ domain, taskMode }: { domain: string, taskMode: AI_TAS
                 detail: { task: AI_TASK.TRANSLATE, service: buildTranslateServiceKey(choice), lang },
             });
         } finally {
-            abortRef.current = null;
+            if (runIdRef.current === myRun) abortRef.current = null;
         }
     };
 
@@ -479,6 +492,7 @@ function FloatingDotApp({ domain, taskMode }: { domain: string, taskMode: AI_TAS
         const { stream, abort } = startAiChatStream({
             task: mode, providerId, payload: { text: original },
         });
+        const myRun = ++runIdRef.current;
         abortRef.current = abort;
         try {
             for await (const delta of stream) {
@@ -494,7 +508,7 @@ function FloatingDotApp({ domain, taskMode }: { domain: string, taskMode: AI_TAS
                 detail: { task: mode, providerId },
             });
         } finally {
-            abortRef.current = null;
+            if (runIdRef.current === myRun) abortRef.current = null;
         }
     };
 

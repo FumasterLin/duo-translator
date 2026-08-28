@@ -391,7 +391,7 @@ export function TranslationPage({ onOpenSiteRules }: TranslationPageProps) {
     setClearCacheOpen(false);
     await clearTranslationCache();
     setCacheCleared(true);
-    setTimeout(() => setCacheCleared(false), 1500);
+    cacheClearedTimer.current = setTimeout(() => setCacheCleared(false), 1500);
   };
 
   const onFloatBall = (v: boolean) => {
@@ -470,6 +470,8 @@ export function TranslationPage({ onOpenSiteRules }: TranslationPageProps) {
   // We update React state immediately (for in-page preview) and trail the
   // persistence + cross-tab broadcast by ~120 ms.
   const persistTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  // "Cache cleared" feedback timer — cleared on unmount with the others below.
+  const cacheClearedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const persistColorDebounced = (
     colorKey: CONFIG_KEY,
     indexKey: CONFIG_KEY,
@@ -487,6 +489,7 @@ export function TranslationPage({ onOpenSiteRules }: TranslationPageProps) {
   useEffect(() => {
     return () => {
       Object.values(persistTimers.current).forEach((t) => clearTimeout(t));
+      if (cacheClearedTimer.current !== null) clearTimeout(cacheClearedTimer.current);
     };
   }, []);
 
