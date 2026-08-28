@@ -34,7 +34,13 @@ interface CacheRecord extends CachedTranslation {
     key: string;
     size: number;       // approximate byte cost of this record
     lastAccess: number; // epoch ms — LRU ordering key
+    /** First/last 16 chars of the source — cheap collision fingerprint. */
+    p?: string;
+    x?: string;
 }
+
+/** Length of the source-text fingerprint stored for collision detection. */
+const FINGERPRINT_CHARS = 16;
 
 // ---------------------------------------------------------------------------
 // Key hashing
@@ -152,6 +158,15 @@ export async function getMany(
         req.onsuccess = () => {
             const rec = req.result as CacheRecord | undefined;
             if (!rec) return;
+            // Collision check. The key is a hash + length, so two different
+            // sources can — rarely — share one; without this check a collision
+            // silently served the OTHER text's translation, and the two kept
+            // overwriting each other's record forever. Records written before
+            // the fingerprint existed are trusted as before.
+            const src = texts[i];
+            if (rec.p !== undefined && (rec.p !== src.slice(0, FINGERPRINT_CHARS) || rec.x !== src.slice(-FINGERPRINT_CHARS))) {
+                return; // treat as a miss; fresh fetch will overwrite
+            }
             out[i] = { t: rec.t, s: rec.s, c: rec.c };
             rec.lastAccess = now;
             store.put(rec); // touch for LRU
@@ -186,6 +201,8 @@ export async function putMany(
             c: e.value.c,
             size: 0,
             lastAccess: now,
+            p: e.text.slice(0, FINGERPRINT_CHARS),
+            x: e.text.slice(-FINGERPRINT_CHARS),
         };
         rec.size = approxSize(rec);
         records.set(key, rec);
