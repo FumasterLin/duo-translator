@@ -1,4 +1,4 @@
-import { splitSentence, wrapTextNode2Span } from "@/main/dom/sentence";
+import { alignSentenceBlocks, splitSentence, wrapTextNode2Span } from "@/main/dom/sentence";
 import { TAB_ACTION, TRANSLATE_STATUS_KEY, CONFIG_KEY, DB_ACTION, TRANSLATE_SERVICE, DOMAIN_STRATEGY, TRANSLATE_ACTION, ACTION, STORAGE_ACTION, VIEW_STRATEGY, DEFAULT_STRATEGY, ELEMENT_STATUS, APP_NAME, APP_NAME_WITH_SUFFIX, DEFAULT_VALUE, STATUS_SUCCESS, CONFIG_VALUE_TO_KEY, LANGUAGES_MAP, IS_FIREFOX, browserTargetLanguage, FLOAT_BALL_STYLE, EXTENSION_INVALID_CONTEXT_MSG, STYLE_BLUR, TRANSLATING_ANIMATION } from "./constants";
 import { restore, translateParams, getTranslateResult, translate, TranslateResult, detectTextsLanguages } from "./translateClient";
 import { buildNoTranslateLanguageSet, isNoTranslateLanguage } from "./noTranslateLanguage";
@@ -205,13 +205,22 @@ export async function content() {
     document.addEventListener('keydown', async (e) => {
         // Ignore auto-repeat while the key is held.
         if (e.repeat) return;
+        // Synchronous short-circuit FIRST: this handler sees every keystroke
+        // on the page, and the config read below is async — without this gate
+        // each keypress woke a storage read (and could rouse the MV3 service
+        // worker) just to discover the key was a letter. Only the two
+        // modifiers we can ever be configured to react to proceed.
+        if (e.key !== 'Control' && e.key !== 'Alt') {
+            // Any non-modifier key (or the wrong modifier) breaks the tap sequence,
+            // so real combos like Ctrl+C never trigger a double-tap.
+            lastModifierTapTime = 0;
+            return;
+        }
         // Nothing before this point touches the event synchronously (no
         // preventDefault/stopPropagation), so awaiting here is safe.
         const modifier = await readConfig<string>(CONFIG_KEY.DOUBLE_TAP_MODIFIER);
         const expectedKey = modifier === 'alt' ? 'Alt' : 'Control';
         if (e.key !== expectedKey) {
-            // Any non-modifier key (or the wrong modifier) breaks the tap sequence,
-            // so real combos like Ctrl+C never trigger a double-tap.
             lastModifierTapTime = 0;
             return;
         }
@@ -597,6 +606,12 @@ export async function content() {
     let forgottenRootCount = 0;
 
     //#region observer
+    // Serializes the async restore/retranslate work per paragraph for
+    // characterData mutations: two rapid edits to the same paragraph used to
+    // race two restores, and whichever finished LAST won — occasionally
+    // writing the older captured text back over the newer one.
+    const charDataRestoreQueues = new WeakMap<Node, Promise<void>>();
+
     const observer = new MutationObserver(async mutations => {
         for (const mutation of mutations) {
             if (mutation.type === 'characterData') {
@@ -617,19 +632,26 @@ export async function content() {
                 let text = target.textContent
 
                 let translateStatus = duoTranslatedElementMap.has(p) || translatedElementMap.has(p)
-                restoreOriginalParagraphElement(p).then(() => {
-                    // probably get old original text
-                    if (target.textContent != text) {
-                        ignoreMutationElements.add(target)
-                        target.textContent = text
-                        Promise.resolve().then(() => {
-                            ignoreMutationElements.delete(target)
-                        })
-                    }
-                    if (translateStatus) {
-                        translateParagraphElements([p])
-                    }
-                })
+                // Chain onto any restore already running for this paragraph
+                // (see charDataRestoreQueues above). `text` and
+                // `translateStatus` stay captured at mutation time — they
+                // describe the edit, not the queue's eventual timing.
+                const chained = (charDataRestoreQueues.get(p) ?? Promise.resolve()).then(() =>
+                    restoreOriginalParagraphElement(p).then(() => {
+                        // probably get old original text
+                        if (target.textContent != text) {
+                            ignoreMutationElements.add(target)
+                            target.textContent = text
+                            Promise.resolve().then(() => {
+                                ignoreMutationElements.delete(target)
+                            })
+                        }
+                        if (translateStatus) {
+                            translateParagraphElements([p])
+                        }
+                    })
+                );
+                charDataRestoreQueues.set(p, chained.catch(() => { /* keep the queue alive on failure */ }))
                 continue
             }
             // A ShadowRoot is a valid mutation target (we observe each root
@@ -848,14 +870,22 @@ export async function content() {
                 translateSelectionAction(message.data as string)
                 break
             case ACTION.ACTIVE_TRANSLATE_SERVICE_CHANGED:
-                let activeTranslateService = message.data.activeTranslateService
-                if (activeTranslateService !== undefined) {
-                    translateService = activeTranslateService
+                // `break` is load-bearing here. Falling through used to dump
+                // this message's data object into the CONFIG_CHANGED fan-out
+                // below — harmless only while neither key matched a
+                // CONFIG_KEY branch. The identical bug was already fixed once
+                // in the TRANSLATE_INPUT_BOX case; don't reintroduce it.
+                {
+                    let activeTranslateService = message.data.activeTranslateService
+                    if (activeTranslateService !== undefined) {
+                        translateService = activeTranslateService
+                    }
+                    let activeAiTranslateServiceChoice = message.data.activeAiTranslateServiceChoice
+                    if (activeAiTranslateServiceChoice !== undefined) {
+                        shareConfig.aiTranslateServiceChoice = activeAiTranslateServiceChoice
+                    }
                 }
-                let activeAiTranslateServiceChoice = message.data.activeAiTranslateServiceChoice
-                if (activeAiTranslateServiceChoice !== undefined) {
-                    shareConfig.aiTranslateServiceChoice = activeAiTranslateServiceChoice
-                }
+                break
             case ACTION.CONFIG_CHANGED:
                 if (typeof message.data !== "object") return
                 let activeFlag = !!message.active
@@ -1219,10 +1249,16 @@ export async function content() {
         if (!text) {
             // translate input box
             const active = deepActiveElement()
-            if (!active || !(active instanceof HTMLElement) || IsEditableElement(active)) return
+            // `!IsEditableElement` — this branch is "no selection, so translate
+            // whatever input is FOCUSED". The guard used to read
+            // `IsEditableElement(active)` (positive), which recorded a
+            // NON-editable element as the translate target and bailed on real
+            // inputs — the exact inversion of the double-tap handler's
+            // doInput branch. Alt+A over an input box was a no-op.
+            if (!active || !(active instanceof HTMLElement) || !IsEditableElement(active)) return
             lastEditableElement = active
             translateInputBox()
-            // console.log('translateSelectionInputBox active: ', active)
+            // console.log("translateSelectionInputBox active: ", active)
             return
         }
         // console.log('translateSelectionInputBox text: ', text)
@@ -1724,6 +1760,22 @@ export async function content() {
         removeCSS()
         domObserved = false
         observer.disconnect()
+        // Cancel in-flight work, don't just ignore it. Without this, a batch
+        // that was already over the network when the switch flipped would
+        // return and write its translations into the freshly restored page;
+        // the pending batch timer and the lazy observer would do the same one
+        // tick later. Same teardown set as restoreOriginalAction below — every
+        // translate path mints a fresh controller, so aborting the old one
+        // here is safe.
+        if (batchTimer) {
+            clearTimeout(batchTimer)
+            batchTimer = null
+        }
+        batchElements.length = 0
+        intersectionObserver.disconnect()
+        resetObserveTargets()
+        stopBuiltinAiWait()
+        controller?.abort()
         resetShadowRoots()
         resetShadowCss()
         removeFloatBall()
@@ -1733,7 +1785,7 @@ export async function content() {
         videoSubtitle = null
         minimalPlayerUi?.destroy()
         minimalPlayerUi = null
-        restoreOriginalPage(true, true)
+        await restoreOriginalPage(true, true)
     }
 
     /**
@@ -2077,8 +2129,18 @@ export async function content() {
         if (forgottenRootCount < ROOT_COMPACT_THRESHOLD) return;
         forgottenRootCount = 0;
         if (!domObserved) return;
+        // observer.disconnect() also discards records already queued but not
+        // yet delivered to the callback; reconnecting only guarantees FUTURE
+        // changes. Re-enqueue the roots we know about so a change that landed
+        // in the dropped window is re-scanned now instead of waiting for the
+        // next unrelated mutation to self-heal. The rescan early-exits on
+        // already-marked paragraphs, so this is a budgeted walk, not a
+        // retranslation.
+        pendingMarkRoots.add(document.body);
+        for (const root of knownRoots()) pendingMarkRoots.add(root);
         observer.disconnect();
         startObserveDom();
+        scheduleMutationProcess();
     }
 
     // Fan a translate/restore out to this tab's sub-frames. The top frame can't
@@ -3626,14 +3688,25 @@ export async function content() {
                         let validOriginalSentencesLen = originalSentences.filter(s => s.trim() !== '').length;
                         if (originalSentences.length === 0 || validOriginalSentencesLen < bilingualHighlightingMinSentences) continue
                         const translatedSentences = splitSentence(translatedTextResult.text)
-                        if (translatedSentences.filter(s => s.trim() !== '').length != validOriginalSentencesLen) continue // todo fallback to using AI for sentence segmentation
+                        // The hover pairing pairs the two sides by index, so
+                        // they must carry the same number of segments.
+                        // Machine translators keep sentence structure and pass
+                        // through unchanged; an AI provider freely merges or
+                        // splits sentences, and one mismatched count used to
+                        // drop the WHOLE unit's highlighting (the old gate was
+                        // strict equality). Mismatched sides are re-segmented
+                        // into proportional blocks instead — coarser pairing,
+                        // but the highlight survives.
+                        const aligned = alignSentenceBlocks(originalSentences, translatedSentences)
+                        if (!aligned) continue
                         if (highlightApiSupported) {
                             // Blank segments yield no range, so both arrays are
-                            // indexed by non-blank sentence order — the very count
-                            // the gate above equalized, which is what makes
+                            // indexed by non-blank sentence order — equal on
+                            // both sides by construction (equal counts in, one
+                            // non-blank block out), which is what makes
                             // pairing by index correct.
-                            const originalRanges = buildSentenceRanges(originalTextResult.textNodes, originalSentences)
-                            const translationRanges = buildSentenceRanges(translatedTextResult.textNodes, translatedSentences)
+                            const originalRanges = buildSentenceRanges(originalTextResult.textNodes, aligned.original)
+                            const translationRanges = buildSentenceRanges(translatedTextResult.textNodes, aligned.translated)
                             if (originalRanges.length === 0 || translationRanges.length === 0) continue
                             record.sentences = { original: originalRanges, translation: translationRanges }
                             highlightedAny = true
@@ -3643,9 +3716,9 @@ export async function content() {
                             originalTextResult.textNodes.forEach(textNode => {
                                 record.texts.push({ text: textNode, content: textNode.textContent })
                             })
-                            const spans = wrapTextNode2Span(originalTextResult.textNodes, originalSentences, ignoreMutationElements, sequenceOffset)
-                            spans.push(...wrapTextNode2Span(translatedTextResult.textNodes, translatedSentences, ignoreMutationElements, sequenceOffset))
-                            sequenceOffset += originalSentences.length
+                            const spans = wrapTextNode2Span(originalTextResult.textNodes, aligned.original, ignoreMutationElements, sequenceOffset)
+                            spans.push(...wrapTextNode2Span(translatedTextResult.textNodes, aligned.translated, ignoreMutationElements, sequenceOffset))
+                            sequenceOffset += aligned.original.length
                             if (spans.length > 0) highlightedAny = true
                         }
                     }
