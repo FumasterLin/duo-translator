@@ -173,6 +173,8 @@ export class SubtitleOverlay {
     private renderedText: string | null = null;
     private renderedTranslated: string | undefined | null = null;
     private dragging = false;
+    /** Removes the document-level listeners of an in-flight drag (see onBoxDown). */
+    private activeDragOff: (() => void) | null = null;
     private disposed = false;
     private disposers: (() => void)[] = [];
 
@@ -584,9 +586,13 @@ export class SubtitleOverlay {
                 const deltaPct = ((startY - ev.clientY) / playerH) * 100;
                 this.setPosition(startPct + deltaPct);
             };
-            const onUp = () => {
+            const offDrag = () => {
                 document.removeEventListener("mousemove", onMove, true);
                 document.removeEventListener("mouseup", onUp, true);
+                this.activeDragOff = null;
+            };
+            const onUp = () => {
+                offDrag();
                 if (!moved) return;
                 this.dragging = false;
                 this.player.style.cursor = playerCursor;
@@ -597,12 +603,19 @@ export class SubtitleOverlay {
             };
             document.addEventListener("mousemove", onMove, true);
             document.addEventListener("mouseup", onUp, true);
+            // A mouseup that never arrives (window lost focus mid-drag) would
+            // otherwise leave this pair attached forever — and the next mouse
+            // move would keep calling setPosition with the dead gesture's
+            // coordinates. Track it so dispose() can drain.
+            this.activeDragOff?.();
+            this.activeDragOff = offDrag;
         };
 
         this.box.addEventListener("mousedown", onBoxDown);
         this.box.addEventListener("mousedown", swallow);
         this.box.addEventListener("click", swallow);
         this.disposers.push(() => {
+            this.activeDragOff?.();
             this.box.removeEventListener("mousedown", onBoxDown);
             this.box.removeEventListener("mousedown", swallow);
             this.box.removeEventListener("click", swallow);

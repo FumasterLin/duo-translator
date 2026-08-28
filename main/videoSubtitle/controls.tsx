@@ -235,8 +235,17 @@ export function mountSubtitleControls(deps: SubtitleControlsDeps): SubtitleContr
         ensureButton,
         destroy: () => {
             stopThemeWatch();
-            try { root.unmount(); } catch { }
-            host.remove();
+            // Deferred unmount, same as every other floating surface
+            // (wordDict / selectionIcon / floatBall): a synchronous unmount
+            // from inside a React event handler or render pass makes React
+            // throw "update during render". Current call sites happen to await
+            // before teardown, but nothing here should depend on that.
+            const rootToTeardown = root;
+            const hostToRemove = host;
+            setTimeout(() => {
+                try { rootToTeardown.unmount(); } catch { }
+                hostToRemove.remove();
+            }, 0);
             button?.remove();
             button = null;
         },

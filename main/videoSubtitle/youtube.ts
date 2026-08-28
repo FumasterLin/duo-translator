@@ -52,7 +52,7 @@ function bridgeRpc(): Promise<YtBridgePlayerData | null> {
         };
         const timer = window.setTimeout(() => finish(null), RPC_TIMEOUT_MS);
         window.addEventListener("message", onMessage);
-        window.postMessage({ type: YT_BRIDGE_REQUEST, id }, "*");
+        window.postMessage({ type: YT_BRIDGE_REQUEST, id }, "https://www.youtube.com");
     });
 }
 
@@ -78,7 +78,7 @@ function bridgeFetchTrack(videoId: string, languageCode: string, kind: string): 
         window.addEventListener("message", onMessage);
         window.postMessage(
             { type: YT_BRIDGE_TRACK_REQUEST, id, videoId, languageCode, kind },
-            "*",
+            "https://www.youtube.com",
         );
     });
 }

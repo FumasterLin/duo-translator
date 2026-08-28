@@ -278,11 +278,22 @@ export default defineContentScript({
         const nativeCaptionsOn = (): boolean =>
             document.querySelector(".ytp-subtitles-button")?.getAttribute("aria-pressed") === "true";
 
+        // One in-flight capture per track. The message channel is same-window
+        // postMessage, which any page script can also write to: without this
+        // guard a loop of forged TRACK_REQUESTs would thrash the caption
+        // module (unload/load/SELECT) forever. A request that duplicates an
+        // in-flight one gets an immediate null and the real caller's own retry
+        // cadence picks the result up.
+        const activeTrackRequests = new Set<string>();
+
         const handleTrackRequest = (req: YtBridgeTrackRequest) => {
             const respond = (body: string | null) => {
                 window.postMessage(
                     { type: YT_BRIDGE_TRACK_RESPONSE, id: req.id, body },
-                    "*",
+                    // Not "*": this bridge only exists on www.youtube.com, so
+                    // name the origin instead of letting any embedding context
+                    // qualify as a target.
+                    "https://www.youtube.com",
                 );
             };
 
@@ -298,6 +309,13 @@ export default defineContentScript({
                 respond(null);
                 return;
             }
+
+            const requestKey = `${req.videoId}|${req.languageCode}|${req.kind ?? ""}`;
+            if (activeTrackRequests.has(requestKey)) {
+                respond(null);
+                return;
+            }
+            activeTrackRequests.add(requestKey);
 
             // From here on we need to observe the player's own timedtext
             // request, so the interceptors must be up for the duration.
@@ -319,6 +337,7 @@ export default defineContentScript({
                 listeners.delete(onCapture);
                 clearTimeout(timer);
                 pendingCaptures--;
+                activeTrackRequests.delete(requestKey);
                 scheduleUninstall();
                 // Leave the user-visible CC state as we found it. Fetching a
                 // track means SELECTING it in the real player, so this is not
@@ -387,7 +406,7 @@ export default defineContentScript({
                 } catch {
                     data = null;
                 }
-                window.postMessage({ type: YT_BRIDGE_RESPONSE, id: msg.id, data }, "*");
+                window.postMessage({ type: YT_BRIDGE_RESPONSE, id: msg.id, data }, "https://www.youtube.com");
             } else if (msg.type === YT_BRIDGE_TRACK_REQUEST) {
                 handleTrackRequest(msg as YtBridgeTrackRequest);
             }
