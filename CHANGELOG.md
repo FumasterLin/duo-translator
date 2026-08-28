@@ -5,6 +5,101 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.5] - 2026-08-27
+
+A hardening release from a full code review: correctness fixes for the AI page
+translator and Microsoft, credential-handling tightening, and several
+long-lived races closed. No feature changes.
+
+### Security
+
+- API keys and WebDAV passwords are no longer written to the background
+  service worker's console. Saving a provider or connecting a sync target used
+  to log the full message payload, and the SW console survives until the next
+  wake — anything pasted into a bug report would have carried the secrets
+- A key embedded directly in a provider URL (a Gemini endpoint pasted in with
+  `?key=…`) is now stripped from cloud sync and from exported backups, the
+  same way the `apiKey` field always was; this device's original URL is
+  restored when a synced record comes back
+- The Gemini key travels in the `x-goog-api-key` request header instead of the
+  URL, where every proxy in front of the API could log it. Providers saved
+  with the old URL template migrate automatically
+- Configured colors are validated before being interpolated into the
+  stylesheet the extension applies to pages and every page shadow root, so a
+  hand-edited or maliciously crafted backup can no longer inject arbitrary CSS
+  into translated pages
+- AI prompts now state explicitly that the page text is data and never
+  instructions, closing the free win for pages embedding
+  "ignore previous instructions" style content
+
+### Fixed
+
+- Bilingual sentence highlighting missing on some AI-translated paragraphs.
+  Hover pairing requires the same number of segments on both sides, which
+  machine translators naturally produce but an AI freely breaks by merging two
+  sentences into one or splitting one in two — any mismatched paragraph lost
+  its highlight entirely. Mismatched sides are now re-segmented into
+  proportional blocks, so a merged pair lights up together with its single
+  counterpart: coarser granularity where the model merged, but the highlight
+  is always there
+- AI page translation shifting every paragraph after an empty one: when the
+  model returned an empty segment (or answered `A<sep/><sep/>B`), the empty
+  was dropped and each following translation landed on the next paragraph
+  down. Interior empties are now kept and fall back to the source text, and
+  the `<bN>` inline markers are verified per segment — a segment whose markers
+  the model dropped or fabricated degrades to plain text instead of scattering
+  words into the wrong inline elements
+- Microsoft failing a whole first screen with an HTTP 400: the request-size
+  split existed but was never wired in, so a large viewport batch exceeded the
+  endpoint's element/character caps in one request. It is now split and the
+  results reassembled in order
+- The Alt+A "translate selection input" shortcut doing nothing over a real
+  input box — the guard that decides "no selection, so translate the focused
+  input" tested inverted
+- Text containing `<` or `&` garbling Google translations: the source was sent
+  unescaped inside the `<a i=N>` index markup, and the mis-parsed answer came
+  back out of order
+- Translations reappearing after the extension was turned off mid-flight:
+  in-flight batches, the pending batch timer and the lazy viewport observer
+  are now cancelled at switch-off instead of writing into the freshly
+  restored page
+- The right-click menu occasionally translating a page instead of restoring
+  it (or vice versa) after the extension had gone idle: the direction is now
+  decided by the content script, which owns the real per-tab state
+- A one-time migration from the old PouchDB storage permanently discarding
+  the user's settings after a single transient IndexedDB error — real errors
+  now leave the migration unmarked and it retries on the next browser start;
+  migrated keys also get sync clocks so a freshly migrated device no longer
+  loses every merge against a peer
+- An edit made during a cloud-sync round-trip being rolled back and silently
+  dropping out of sync: the merge now reads the local snapshot after the
+  network pull, not before
+- A failed dictionary refresh replacing a perfectly good cached entry with a
+  permanent "no entry", leaving that word paying a network request on every
+  lookup
+- Two devices creating duplicate Drive sync files on a simultaneous first
+  push and never converging — both now settle on the same file
+- Sentence-highlight setup being able to freeze the tab on degenerate input
+  (a counter that never advanced past an empty text node)
+- Closing the subtitle overlay mid-drag could leave drag listeners attached
+  that kept moving the box with the dead gesture's coordinates
+- Missing-streaming cancellations in the AI workbench and floating dot: an
+  aborted predecessor's cleanup could disable the next run's Stop button
+- A handful of smaller ones: the settings page allows disabling the
+  translation service currently in use again; SSE streams from CRLF servers
+  no longer parse as empty; deleting a rule no longer hangs its caller on
+  failure; long text-to-speech requests no longer fire every chunk at once;
+  translation-cache hits are fingerprint-checked against hash collisions;
+  pinned-but-deleted AI providers now fail loudly instead of silently routing
+  paid requests to a different account
+
+### Changed
+
+- Added the `unlimitedStorage` permission (silent on install): configuration
+  plus rule-subscription caches were living close to the chrome.storage.local
+  default quota, and a quota failure mid-sync could leave a half-applied
+  state
+
 ## [2.2.4] - 2026-08-25
 
 ### Changed
