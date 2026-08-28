@@ -763,9 +763,11 @@ export enum AI_TASK {
     FORMAL = 'formal',
     CASUAL = 'casual',
     CUSTOM = 'custom',
-    /** Page-translation: AI receives a JSON-stringified array of paragraph
-     *  texts (with <bN> placeholder tags) and must return a JSON array of the
-     *  same length with translations preserving the placeholders. */
+    /** Page-translation: AI receives the batch's paragraph texts joined by the
+     *  literal `<sep/>` separator (each segment may contain <bN> placeholder
+     *  tags) and must return the segments in the same order, separated by
+     *  `<sep/>`, placeholders preserved. Split back apart — and the
+     *  placeholders verified — in aiPageTranslate. NOT JSON. */
     PAGE_TRANSLATE = 'pageTranslate',
 }
 

@@ -100,7 +100,11 @@ export const PROVIDER_CATALOG: ProviderCatalogEntry[] = [
     {
         type: "gemini",
         label: "Gemini",
-        defaultUrl: "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}",
+        // No `?key={key}` — auth goes in the x-goog-api-key header (see
+        // geminiRequestTarget in aiService). The {key} template stays valid
+        // for hand-written custom URLs, but the default must not put the key
+        // in a URL that proxies log.
+        defaultUrl: "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
         requiresApiKey: true,
         models: [
             "gemini-3.7-flash",
