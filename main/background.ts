@@ -1,15 +1,13 @@
 import {
     STATUS_FAIL,
     STATUS_SUCCESS,
-    DOMAIN_STRATEGY,
     TRANSLATE_ACTION,
-    TRANSLATE_SERVICE, CONFIG_KEY,
+    CONFIG_KEY,
     TRANSLATE_STATUS_KEY,
     TAB_ACTION,
     DB_ACTION,
     STORAGE_ACTION,
     ACTION,
-    VIEW_STRATEGY,
     APP_NAME_WITH_SUFFIX,
     SYNC_ACTION,
     SYNC_PROVIDER_ID,
@@ -86,6 +84,17 @@ export async function background() {
     // listener itself reads the global switch from storage at dispatch time.
     browser.commands.onCommand.addListener(shortcutKeyListener);
 
+    // Context-menu click + tab-activation listeners: same first-synchronous-
+    // turn rule as the ones above. They used to be attached inside
+    // initContextMenu(), which the async bootstrap only calls when both the
+    // global switch and the context-menu switch are on — on Firefox an event
+    // page that had gone to sleep would not wake for the menu click at all,
+    // and on Chrome a cold wake ran the click with no listener registered.
+    // Whether the menu ITEMS exist stays controlled by the bootstrap/config
+    // path; the listeners are cheap no-ops when no item is there to click.
+    browser.contextMenus.onClicked.addListener(contextMenuClickLister)
+    browser.tabs.onActivated.addListener(tabsActivatedListener)
+
     // IMPORTANT (MV3): an idle SW is torn down and cold-started by the very event
     // that needs it. runtime.onMessage / onConnect listeners MUST be registered
     // during this first synchronous turn — if we `await` before reaching them,
@@ -95,24 +104,38 @@ export async function background() {
     // the extension had gone inactive. So the config load runs as a DETACHED
     // bootstrap, NOT awaited on the path to the listeners below.
     void (async () => {
-        const [ctxMenu, interfaceLang, globalSwitch] = await Promise.all([
-            configRepo.getT<boolean>(CONFIG_KEY.CONTEXT_MENU_SWITCH),
-            configRepo.get(CONFIG_KEY.INTERFACE_LANGUAGE),
-            configRepo.getT<boolean>(CONFIG_KEY.GLOBAL_SWITCH)
-        ])
-        contextMenuSwitch = ctxMenu
-        currentInterfaceLang = normalizeInterfaceLang(interfaceLang) || currentInterfaceLang
+        try {
+            const [ctxMenu, interfaceLang, globalSwitch] = await Promise.all([
+                configRepo.getT<boolean>(CONFIG_KEY.CONTEXT_MENU_SWITCH),
+                configRepo.get(CONFIG_KEY.INTERFACE_LANGUAGE),
+                configRepo.getT<boolean>(CONFIG_KEY.GLOBAL_SWITCH)
+            ])
+            contextMenuSwitch = ctxMenu
+            currentInterfaceLang = normalizeInterfaceLang(interfaceLang) || currentInterfaceLang
 
-        if (globalSwitch) {
-            if (contextMenuSwitch) {
-                initContextMenu()
+            if (globalSwitch) {
+                if (contextMenuSwitch) {
+                    initContextMenu()
+                }
             }
+        } catch (e) {
+            // The bootstrap used to run bare: one rejected read (storage
+            // hiccup) silently skipped EVERYTHING below it — menu init,
+            // migration retry, auto-sync — for the whole life of this worker.
+            console.error(APP_NAME_WITH_SUFFIX, 'background bootstrap failed', e)
         }
 
-        // Safety-net: in case the onInstalled-driven migration was killed by a
-        // SW shutdown, retry on every boot. The migration module itself is
-        // idempotent (flag-checked) so this is a near-free no-op once done.
-        !IS_FIREFOX && await migrateFromPouchIfNeeded({ trigger: 'startup' });
+        try {
+            // Safety-net: in case the onInstalled-driven migration was killed by a
+            // SW shutdown, retry on every boot. The migration module itself is
+            // idempotent (flag-checked) so this is a near-free no-op once done.
+            // It is allowed to throw here (see migrateFromPouchIfNeeded): a real
+            // failure must NOT block the auto-sync setup below, and it will be
+            // retried on the next boot anyway.
+            !IS_FIREFOX && await migrateFromPouchIfNeeded({ trigger: 'startup' });
+        } catch (e) {
+            console.error(APP_NAME_WITH_SUFFIX, 'PouchDB migration failed (will retry next boot)', e)
+        }
 
         // Schedule periodic auto-sync + run the startup sync (if enabled) once
         // migration settled.
@@ -130,7 +153,11 @@ export async function background() {
                 sendResponse({ status: STATUS_FAIL, data: { name: e.name, message: e.message, recieved: message } })
             }
         }
-        console.log('background onMessage', message)
+        // Log the action ONLY. Full payloads have carried API keys (provider
+        // saves) and WebDAV passwords (connect requests) into the SW console,
+        // which survives until the next worker wake and lands in any log the
+        // user pastes into an issue.
+        console.debug('background onMessage', message.action)
         // Feature modules own their own handlers; background only dispatches.
         // A plain synchronous table lookup, so the MV3 first-turn registration
         // rule above is unaffected.
@@ -148,13 +175,15 @@ export async function background() {
                 })
                 return true
             case DB_ACTION.RULE_DEL:
-                try {
-                    ruleRepo.delete(message.data.domain, message.data.data).then(() => {
-                        sendResponse({ status: STATUS_SUCCESS, data: "delete success" });
-                    })
-                } catch (e) {
-                    sendResponse({ status: STATUS_FAIL, data: "delete fail" });
-                }
+                // `.catch` is required, not optional: the surrounding try/catch
+                // cannot see an async rejection, so without it a failed delete
+                // left an unhandled rejection AND a sender waiting for its 5s
+                // timeout. Mirrors the RULE_ADD shape right above.
+                ruleRepo.delete(message.data.domain, message.data.data).then(() => {
+                    sendResponse({ status: STATUS_SUCCESS, data: "delete success" });
+                }).catch((e) => {
+                    errorResponse(e)
+                });
                 return true
             case DB_ACTION.RULE_LIST:
                 console.debug("list rule from domain", message.data.domain)
@@ -369,23 +398,31 @@ export async function background() {
                 }).catch((e) => sendResponse({ status: STATUS_FAIL, data: e?.message || String(e) }));
                 return true
             }
-            case TAB_ACTION.LANGUAGE_GET:
+            case TAB_ACTION.LANGUAGE_GET: {
                 // get the language of the tab
                 // try get tabId from message data and sender tab
-                let tabId = sender.tab?.id || message.data.id
+                const tabId = sender.tab?.id || message.data?.id
                 if (!tabId) {
                     sendResponse({ status: STATUS_FAIL, data: "tabId is null" });
                     return
                 }
-                let url = sender.tab?.url || message.data.url
-                if (!url.startsWith('http')) {
+                const url = sender.tab?.url || message.data?.url
+                if (typeof url !== 'string' || !url.startsWith('http')) {
                     sendResponse({ status: STATUS_FAIL, data: "url is not http or https" });
                     return
                 }
-                browser.tabs.detectLanguage((lang: string) => {
+                // Promise form with an EXPLICIT tabId. The old callback form was
+                // broken three ways: Firefox's promise-based API rejects a
+                // callback argument (unhandled, sender timed out); on Chrome the
+                // callback-without-tabId variant detects the *active* tab, not
+                // the sender's; and runtime.lastError was never checked.
+                browser.tabs.detectLanguage(tabId).then((lang) => {
                     sendResponse({ status: STATUS_SUCCESS, data: lang });
-                })
-                return true;
+                }).catch((e) => {
+                    sendResponse({ status: STATUS_FAIL, data: e?.message || String(e) });
+                });
+                return true
+            }
             case TAB_ACTION.TAB_DOMAIN_GET:
                 browser.tabs.query({ active: true, currentWindow: true }).then((tabs) => {
                     if (tabs.length === 0) {
@@ -418,7 +455,7 @@ export async function background() {
                     sendResponse({ status: STATUS_FAIL, data: "value is null or empty" });
                     return
                 }
-                console.log('set session storage', key, message.data.value)
+                console.debug('set session storage', key)
                 browser.storage.session.set({ [key]: message.data.value }).then(() => {
                     sendResponse({ status: STATUS_SUCCESS, data: "insert success" });
                 }).catch((e) => {
@@ -673,7 +710,7 @@ export async function background() {
 
     //#region functions
     function contextMenuClickLister(info: Browser.contextMenus.OnClickData, tab: Browser.tabs.Tab | undefined): void {
-        console.log('contextMenus.onClicked', info, tab, translateStatus)
+        console.debug('contextMenus.onClicked', info.menuItemId, tab?.id)
         if (!tab || !tab.id) {
             return
         }
@@ -681,21 +718,24 @@ export async function background() {
         // extension was reloaded/updated after the tab was opened, or it is a
         // page we never inject into). That rejection has no consumer here and
         // would only show up as an unhandled error in chrome://extensions.
+        //
+        // The page/paragraph items send the TOGGLE variants and let the content
+        // script pick the direction. Deciding here from `translateStatus` /
+        // `paraTranslateStatus` was unreliable: both reset when the worker is
+        // suspended, and a menu click on a cold-woken worker would send
+        // TRANSLATE to a page that is already translated — the menu said
+        // "restore" but did the opposite. The content script owns the real
+        // per-tab state (it even persists it to storage.session), so TOGGLE is
+        // always right.
         switch (info.menuItemId) {
             case CONTEXT_MENU.TRANSLATE_RESTORE_PAGE:
-                if (!translateStatus) {
-                    browser.tabs.sendMessage(tab.id, { action: TRANSLATE_ACTION.TRANSLATE }).catch(() => { });
-                } else {
-                    browser.tabs.sendMessage(tab.id, { action: TRANSLATE_ACTION.SHOW_ORIGINAL }).catch(() => { });
-                }
+                browser.tabs.sendMessage(tab.id, { action: TRANSLATE_ACTION.TOGGLE }).catch(() => { });
                 break
             case CONTEXT_MENU.TRANSLATE_INPUT_BOX:
                 browser.tabs.sendMessage(tab.id, { action: TRANSLATE_ACTION.TRANSLATE_INPUT_BOX }).catch(() => { });
                 break
             case CONTEXT_MENU.TRANSLATE_RESTORE_PARA:
-                console.log('translatePara', info, tab)
-                let act = paraTranslateStatus ? TRANSLATE_ACTION.SHOW_ORIGINAL_PARA : TRANSLATE_ACTION.TRANSLATE_PARA
-                browser.tabs.sendMessage(tab.id, { action: act }).catch(() => { });
+                browser.tabs.sendMessage(tab.id, { action: TRANSLATE_ACTION.TOGGLE_TRANSLATE_PARA }).catch(() => { });
                 break
             case CONTEXT_MENU.TRANSLATE_SELECTION:
                 browser.tabs.sendMessage(tab.id, { action: TRANSLATE_ACTION.TRANSLATE_SELECTION, data: info.selectionText }).catch(() => { });
@@ -749,11 +789,10 @@ export async function background() {
     }
 
     function initContextMenu() {
+        // Listeners (onClicked / onActivated) are registered once in the first
+        // synchronous turn of background() — see that site for why. This only
+        // (re)creates the menu items. Repeated calls rely on removeAll() first.
         addAllContextMenus()
-
-        browser.contextMenus.onClicked.addListener(contextMenuClickLister)
-        // Listen for tab activation events
-        browser.tabs.onActivated.addListener(tabsActivatedListener);
     }
 
     function rebuildContextMenus() {
@@ -799,6 +838,9 @@ export async function background() {
     }
 
     function removeContextMenu() {
+        // Items only — the onClicked/onActivated listeners stay registered for
+        // the life of the worker (they are no-ops with no items) so a later
+        // GLOBAL_SWITCH-on can recreate the menus without re-attaching.
         removeMenuQuietly(CONTEXT_MENU.TRANSLATE_RESTORE_PAGE)
         // Was a duplicated TRANSLATE_RESTORE_PAGE — the paragraph item is the
         // one that also needs removing, and it is created dynamically, so the
@@ -806,8 +848,6 @@ export async function background() {
         removeMenuQuietly(CONTEXT_MENU.TRANSLATE_RESTORE_PARA)
         removeMenuQuietly(CONTEXT_MENU.TRANSLATE_SELECTION)
         removeMenuQuietly(CONTEXT_MENU.TRANSLATE_INPUT_BOX)
-        browser.contextMenus.onClicked.removeListener(contextMenuClickLister)
-        browser.tabs.onActivated.removeListener(tabsActivatedListener)
     }
 
     async function shortcutKeyListener(command: string) {
@@ -890,25 +930,6 @@ const CONTEXT_MENU_TRANSLATE_PARA_TITLE = 'contextMenuTranslatePara'
 const CONTEXT_MENU_RESTORE_PARA_TITLE = 'contextMenuRestorePara'
 const CONTEXT_MENU_TRANSLATE_INPUT_BOX_TITLE = 'contextMenuTranslateInputBox'
 const CONTEXT_MENU_TRANSLATE_SELECTION_TITLE = 'contextMenuTranslateSelection'
-
-export class Domain {
-    constructor(domain: string, strategy?: DOMAIN_STRATEGY, aiWritingDisabled?: boolean, aiWritingEnabled?: boolean) {
-        this.domain = domain
-        this.strategy = strategy
-        this.aiWritingDisabled = aiWritingDisabled
-        this.aiWritingEnabled = aiWritingEnabled
-    }
-
-    domain: string
-    strategy?: DOMAIN_STRATEGY
-    viewStrategy?: VIEW_STRATEGY
-    // AI Writing floating dot, blacklist mode: when true, the dot is hidden on this domain.
-    aiWritingDisabled?: boolean
-    // AI Writing floating dot, whitelist mode: when true, the dot is shown
-    // on this domain (and only on whitelisted domains when whitelist mode is on).
-    // Independent of `aiWritingDisabled` — both flags can coexist on one doc.
-    aiWritingEnabled?: boolean
-}
 
 enum CONTEXT_MENU {
     TRANSLATE_RESTORE_PAGE = 'translateRestorePage',
