@@ -36,7 +36,9 @@ afterEach(() => {
 });
 
 describe("built-in AI availability gating", () => {
-    it("is offered by default when the browser has the on-device API", async () => {
+    // Cold module imports + storage reads behind this test stretch past the
+    // 5 s default under full-suite parallelism on a loaded machine.
+    it("is offered by default when the browser has the on-device API", { timeout: 20_000 }, async () => {
         // Empty disabled list = the shipped default, since DEFAULT_VALUE no
         // longer lists 'builtin'.
         const { mod, enabledTranslateServices } = await enabledServices(true, []);

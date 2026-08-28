@@ -38,7 +38,10 @@ afterEach(() => {
 });
 
 describe("builtinAiTranslateTexts — abort", () => {
-    it("passes the caller's signal into every model call", async () => {
+    // The 3-paragraph batch rides the service's internal scheduling (stall
+    // timers, queue turns), which stretches past the 5 s default when the
+    // whole suite runs in parallel on a loaded machine — pass in ~1 s solo.
+    it("passes the caller's signal into every model call", { timeout: 20_000 }, async () => {
         const seen: (AbortSignal | undefined)[] = [];
         installModel(async (text, options) => {
             seen.push(options?.signal);
