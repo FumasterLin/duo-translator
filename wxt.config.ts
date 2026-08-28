@@ -30,7 +30,12 @@ export default defineConfig({
         default_locale: 'en',
         // 'identity' powers Google Drive sync (launchWebAuthFlow everywhere,
         // getAuthToken on Chrome). It shows no user-visible install warning.
-        permissions: ['storage', 'tabs', 'activeTab', 'contextMenus', 'alarms', 'webNavigation', 'identity'],
+        // 'unlimitedStorage': config + rule-subscription caches (2MB per
+        // subscription) + per-key sync bookkeeping all live in
+        // chrome.storage.local, whose default ~10MB quota a quota failure
+        // would tear half-applied (see applyMergedToLocal). The permission is
+        // silent on install — no prompt, no new warning.
+        permissions: ['storage', 'unlimitedStorage', 'tabs', 'activeTab', 'contextMenus', 'alarms', 'webNavigation', 'identity'],
         host_permissions: [
             // firefox needs these (the firefox target is MV3 too -- see the
             // `--mv3` flag on the firefox scripts in package.json)
