@@ -111,14 +111,27 @@ async function runSync(provider: SyncProvider): Promise<SyncResult> {
         }
 
         const includeSecrets = await shouldSyncSecrets();
-        const local = await buildSnapshot({ includeSecrets });
         const remote: Snapshot | null = await provider.pull();
 
         if (!remote) {
+            // Build AFTER the pull: the pull is a network round-trip, and a
+            // config edit that lands during it must not be absent from the
+            // pushed snapshot (it would resurface as a "remote change" on the
+            // next sync and ping-pong).
+            const local = await buildSnapshot({ includeSecrets });
             await provider.push(local);
             return { ok: true, direction: 'upload' };
         }
 
+        // Rebuild the local side AFTER the pull instead of reusing a snapshot
+        // from before it. Merging a stale pre-pull snapshot and applying it
+        // used to overwrite an edit made during the round-trip with the older
+        // local value — and setSyncMeta wholesale-replaces the clocks, so the
+        // edit lost its clock too and vanished from sync entirely. A fresh
+        // build makes a mid-window edit just another local input to the LWW
+        // merge. (The residual window between this read and the apply below
+        // is in-memory only, no network.)
+        const local = await buildSnapshot({ includeSecrets });
         const { merged, localChanged, remoteChanged } = mergeSnapshots(local, remote);
         if (localChanged) await applyMergedToLocal(merged);
         if (remoteChanged) await provider.push(merged);

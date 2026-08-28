@@ -137,9 +137,24 @@ async function saveSyncMeta(m: SyncMeta): Promise<void> {
     await storage.setItem(META_KEY, m);
 }
 
+// Serializes sync-meta read-modify-write cycles. touchKey / tombstoneKey /
+// touchKeys used to race when two storage messages (CONFIG_SET, RULE_ADD, …)
+// interleaved: onMessage handlers run concurrently, both read the same meta,
+// and the later save silently dropped the other's clock/tombstone/element
+// update. Element clocks would then fall back to key-level LWW — harmless per
+// incident, but the wrong "who was newer" verdict on exactly the multi-device
+// edits the element clocks exist for.
+let metaWriteQueue: Promise<unknown> = Promise.resolve();
+
+function withMetaLock<T>(fn: () => Promise<T>): Promise<T> {
+    const run = metaWriteQueue.then(fn, fn);
+    metaWriteQueue = run.catch(() => { });
+    return run;
+}
+
 /** Replace the whole sync-meta — used after a merge applies the merged clocks. */
 export async function setSyncMeta(meta: SyncMeta): Promise<void> {
-    await saveSyncMeta(meta);
+    await withMetaLock(() => saveSyncMeta(meta));
 }
 
 /**
@@ -196,13 +211,15 @@ function diffElements(m: SyncMeta, dataKey: string, before: unknown, after: unkn
  * the diff. Callers of non-collection keys pass nothing.
  */
 async function touchKey(dataKey: string, change?: { before: unknown; after: unknown }): Promise<void> {
-    const m = await getSyncMeta();
-    const now = Date.now();
-    // Before the key clock moves: the seed inside diffElements reads it.
-    if (change) diffElements(m, dataKey, change.before, change.after, now);
-    m.clocks[dataKey] = now;
-    delete m.tombstones[dataKey];
-    await saveSyncMeta(m);
+    await withMetaLock(async () => {
+        const m = await getSyncMeta();
+        const now = Date.now();
+        // Before the key clock moves: the seed inside diffElements reads it.
+        if (change) diffElements(m, dataKey, change.before, change.after, now);
+        m.clocks[dataKey] = now;
+        delete m.tombstones[dataKey];
+        await saveSyncMeta(m);
+    });
 }
 
 /**
@@ -214,12 +231,14 @@ async function touchKey(dataKey: string, change?: { before: unknown; after: unkn
  * that were deleted with it would then be resurrected by a stale peer.
  */
 async function tombstoneKey(dataKey: string, before?: unknown): Promise<void> {
-    const m = await getSyncMeta();
-    const now = Date.now();
-    if (before !== undefined) diffElements(m, dataKey, before, [], now);
-    delete m.clocks[dataKey];
-    m.tombstones[dataKey] = now;
-    await saveSyncMeta(m);
+    await withMetaLock(async () => {
+        const m = await getSyncMeta();
+        const now = Date.now();
+        if (before !== undefined) diffElements(m, dataKey, before, [], now);
+        delete m.clocks[dataKey];
+        m.tombstones[dataKey] = now;
+        await saveSyncMeta(m);
+    });
 }
 
 /** Bump clocks for several data keys to now — used after a manual import so the
@@ -229,23 +248,25 @@ async function tombstoneKey(dataKey: string, before?: unknown): Promise<void> {
  *  imported elements propagate individually. */
 export async function touchKeys(dataKeys: string[]): Promise<void> {
     if (dataKeys.length === 0) return;
-    const m = await getSyncMeta();
-    const now = Date.now();
-    const collections = dataKeys.filter((k) => collectionIdentity(k) !== null);
-    const stored = collections.length > 0 ? await storage.snapshot('local') : {};
-    for (const k of dataKeys) {
-        const idOf = collectionIdentity(k);
-        if (idOf) {
-            const em = elementMetaFor(m, k, stored[k]);
-            for (const id of indexElements(stored[k], idOf).byId.keys()) {
-                em.clocks[id] = now;
-                delete em.tombstones[id];
+    await withMetaLock(async () => {
+        const m = await getSyncMeta();
+        const now = Date.now();
+        const collections = dataKeys.filter((k) => collectionIdentity(k) !== null);
+        const stored = collections.length > 0 ? await storage.snapshot('local') : {};
+        for (const k of dataKeys) {
+            const idOf = collectionIdentity(k);
+            if (idOf) {
+                const em = elementMetaFor(m, k, stored[k]);
+                for (const id of indexElements(stored[k], idOf).byId.keys()) {
+                    em.clocks[id] = now;
+                    delete em.tombstones[id];
+                }
             }
+            m.clocks[k] = now;
+            delete m.tombstones[k];
         }
-        m.clocks[k] = now;
-        delete m.tombstones[k];
-    }
-    await saveSyncMeta(m);
+        await saveSyncMeta(m);
+    });
 }
 
 const defaultForConfig = configDefault;

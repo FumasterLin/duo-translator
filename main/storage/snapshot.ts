@@ -115,10 +115,32 @@ const PURE_SECRET_KEYS: string[] = [
 
 export type BuildOptions = { includeSecrets?: boolean };
 
-/** Strip apiKey from each AI provider record (used when not syncing secrets). */
+/** Marker written in place of a redacted URL query secret (see redactUrlSecrets). */
+const URL_REDACTED = '<redacted>';
+
+/**
+ * Redact a value that looks like a secret inside a provider URL's query string
+ * (`?key=…`, `&api_key=…`, `&token=…`, …). The `{key}` TEMPLATE placeholder is
+ * left alone — it contains no secret, and stripping it would break the request
+ * URL on devices that import the record.
+ */
+function redactUrlSecrets(url: string): string {
+    return url.replace(/([?&])(key|api[-_]?key|apikey|token|access_token)=[^&]*/gi, `$1$2=${URL_REDACTED}`);
+}
+
+/** Strip apiKey (and URL-embedded secrets) from each AI provider record
+ *  (used when not syncing secrets). */
 function stripApiKeys(providers: unknown): unknown {
     if (!Array.isArray(providers)) return providers;
-    return providers.map((p: any) => ({ ...p, apiKey: '' }));
+    return providers.map((p: any) => ({
+        ...p,
+        apiKey: '',
+        // `url` can carry an embedded key the apiKey field never sees — a
+        // Gemini endpoint pasted in as `?key=AIza…`. Without this, syncing
+        // provider records leaked exactly the kind of secret stripApiKeys
+        // exists to keep off the cloud. reattachApiKeys restores it on apply.
+        ...(typeof p?.url === 'string' ? { url: redactUrlSecrets(p.url) } : {}),
+    }));
 }
 
 // ------------------------------- build -------------------------------------
@@ -461,22 +483,33 @@ export function mergeSnapshots(local: Snapshot, remote: Snapshot): MergeResult {
 // ------------------------------- apply -------------------------------------
 
 /**
- * Re-attach this device's local apiKeys onto incoming AI provider records.
+ * Re-attach this device's local secrets onto incoming AI provider records.
  * The synced value never carries an apiKey unless secret-sync is on, so for any
  * record whose incoming apiKey is empty we keep the local key (matched by id).
- * This lets provider records sync while each device's keys stay on-device.
+ * A URL whose query secret was redacted (see stripApiKeys) is restored the
+ * same way — otherwise a sync round-trip would overwrite this device's
+ * working endpoint with the redaction marker. This lets provider records
+ * sync while each device's keys stay on-device.
  */
 function reattachApiKeys(incoming: unknown, local: unknown): unknown {
     if (!Array.isArray(incoming)) return incoming;
-    const byId = new Map<string, string>();
+    const byId = new Map<string, any>();
     if (Array.isArray(local)) {
         for (const p of local as any[]) {
-            if (p && typeof p.id === 'string' && p.apiKey) byId.set(p.id, p.apiKey);
+            if (p && typeof p.id === 'string' && (p.apiKey || typeof p.url === 'string')) byId.set(p.id, p);
         }
     }
-    return incoming.map((p: any) =>
-        p && !p.apiKey && byId.has(p.id) ? { ...p, apiKey: byId.get(p.id) } : p,
-    );
+    return incoming.map((p: any) => {
+        if (!p || typeof p.id !== 'string') return p;
+        const mine = byId.get(p.id);
+        if (!mine) return p;
+        const out = { ...p };
+        if (!out.apiKey && mine.apiKey) out.apiKey = mine.apiKey;
+        if (typeof out.url === 'string' && out.url.includes(URL_REDACTED) && typeof mine.url === 'string') {
+            out.url = mine.url;
+        }
+        return out;
+    });
 }
 
 /**
@@ -505,8 +538,13 @@ export async function applyMergedToLocal(merged: Snapshot): Promise<void> {
         if (k in current) removes.push(`local:${k}` as StorageItemKey);
     }
 
-    if (removes.length > 0) await storage.removeItems(removes);
+    // Apply sets BEFORE removes, and let a failure here propagate: chrome
+    // storage has no transaction, so this order points the (rare) quota
+    // failure at the least-destructive side — values not half-replaced, and
+    // crucially setSyncMeta below NOT reached, so the clocks never claim
+    // writes that never landed. The next sync re-attempts the whole merge.
     if (sets.length > 0) await storage.setItems(sets);
+    if (removes.length > 0) await storage.removeItems(removes);
 
     // Merge clocks: start from merged, then preserve any local-only clocks for
     // keys the snapshot didn't cover (excluded secrets when not syncing them).
@@ -609,10 +647,7 @@ export function redactSecrets(snap: Snapshot): Snapshot {
     const data = { ...snap.data };
     const providers = data[providersKey];
     if (Array.isArray(providers)) {
-        data[providersKey] = providers.map((p: any) => ({
-            ...p,
-            apiKey: '',
-        }));
+        data[providersKey] = stripApiKeys(providers);
     }
     if (deeplKey in data) {
         data[deeplKey] = '';

@@ -13,7 +13,7 @@
 import PouchDB from 'pouchdb';
 import { storage } from 'wxt/utils/storage';
 import { APP_NAME_WITH_SUFFIX } from '@/main/constants';
-import { STORAGE_PREFIX } from './configStore';
+import { STORAGE_PREFIX, touchKeys } from './configStore';
 
 const FLAG_KEY = 'local:__migration_v1_done' as const;
 const POUCH_DB_NAME = 'userdb';
@@ -58,17 +58,19 @@ async function runMigration(trigger: Trigger): Promise<void> {
     }
 
     let docs: Array<{ _id: string;[k: string]: unknown }> = [];
-    try {
-        const db = new PouchDB(POUCH_DB_NAME);
-        const res = await db.allDocs({ include_docs: true });
-        docs = res.rows
-            .map((r: any) => r.doc)
-            .filter((d: any) => d && typeof d._id === 'string');
-    } catch (e: any) {
-        // Database doesn't exist (fresh install) → still a successful no-op
-        // migration. The flag-write below makes sure we don't try again.
-        console.log(APP_NAME_WITH_SUFFIX, 'PouchDB not present, marking migration complete', e?.message);
-    }
+    // NO catch-and-continue here. PouchDB's IndexedDB adapter CREATES the
+    // database when it is missing, so a fresh profile succeeds with zero rows
+    // rather than throwing — anything that DOES throw is a real failure
+    // (IndexedDB unavailable/corrupt, quota, private-mode lockdown). This used
+    // to swallow those errors and write the done-flag anyway, permanently and
+    // silently discarding the user's legacy settings after one transient
+    // hiccup. Letting it propagate means migrateFromPouchIfNeeded logs it and
+    // the next background wake retries.
+    const db = new PouchDB(POUCH_DB_NAME);
+    const res = await db.allDocs({ include_docs: true });
+    docs = res.rows
+        .map((r: any) => r.doc)
+        .filter((d: any) => d && typeof d._id === 'string');
 
     const writes: Array<{ key: `local:${string}`; value: unknown }> = [];
 
@@ -102,6 +104,13 @@ async function runMigration(trigger: Trigger): Promise<void> {
 
     if (writes.length > 0) {
         await storage.setItems(writes);
+        // Seed LWW clocks for everything just migrated. Without this the
+        // migrated keys carry clock 0 and lose every merge against a remote
+        // holding normal Date.now() clocks — a freshly migrated device would
+        // silently drop its own data on first sync. touchKeys is
+        // collection-aware (AI providers etc. get per-element clocks), which
+        // is exactly what a first sync needs.
+        await touchKeys(writes.map((w) => w.key.slice('local:'.length)));
     }
 
     const flag: MigrationFlag = {

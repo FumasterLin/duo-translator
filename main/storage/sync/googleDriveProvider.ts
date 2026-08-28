@@ -634,7 +634,12 @@ class GoogleDriveProviderImpl implements SyncProvider {
             throw new Error(`Drive list failed: ${res.status} ${await res.text()}`);
         }
         const j = (await res.json()) as { files?: Array<{ id: string; name: string }> };
-        const f = j.files?.[0];
+        // Deterministic pick, not `files[0]`: two devices completing their
+        // first push concurrently each create a same-named file, and Drive
+        // returns the list in no guaranteed order — whichever each device
+        // grabbed, they would sync to different files forever. Sorting by id
+        // makes every device converge onto the same one of the duplicates.
+        const f = j.files?.slice().sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))[0];
         if (!f) return null;
         await storage.setItem(FILE_ID_KEY, f.id);
         return f.id;
