@@ -155,7 +155,21 @@ async function fetchGoogleChunk(text: string, lang: string): Promise<string> {
 
 async function googleTts(text: string, lang: string): Promise<string[]> {
     const chunks = chunkTextForTts(text);
-    return Promise.all(chunks.map((c) => fetchGoogleChunk(c, lang)));
+    // Bounded concurrency, not Promise.all: a long selection fans out into a
+    // dozen-plus simultaneous translate_tts hits, which is exactly the burst
+    // that earns a 429 (and then every chunk fails on its own). Three at a
+    // time adds nothing perceptible for the common 1-3 chunk case.
+    const CONCURRENCY = 3;
+    const out: string[] = new Array(chunks.length);
+    let next = 0;
+    const workers = Array.from({ length: Math.min(CONCURRENCY, chunks.length) }, async () => {
+        while (next < chunks.length) {
+            const i = next++;
+            out[i] = await fetchGoogleChunk(chunks[i], lang);
+        }
+    });
+    await Promise.all(workers);
+    return out;
 }
 
 // ---------------------------------------------------------------------------

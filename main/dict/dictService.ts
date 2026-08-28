@@ -150,8 +150,12 @@ function parseBingDefinitions(html: string): DictDefinition[] {
 }
 
 function parseBingExamples(html: string): DictExample[] {
-    const section = html.slice(html.search(/id="sentenceSeg"/i));
-    if (!section) return [];
+    // search() returns -1 on no-match, and slice(-1) would hand back the
+    // LAST character of the page — truthy, so the old `!section` guard never
+    // fired and the regex below scanned a one-char haystack. Check the index.
+    const idx = html.search(/id="sentenceSeg"/i);
+    if (idx < 0) return [];
+    const section = html.slice(idx);
     const out: DictExample[] = [];
     const re = /class="sen_en[^"]*"[^>]*>([\s\S]*?)<\/div>[\s\S]{0,400}?class="sen_cn[^"]*"[^>]*>([\s\S]*?)<\/div>/gi;
     let m: RegExpExecArray | null;
@@ -409,8 +413,13 @@ export async function lookupDict(
             // Fire-and-forget. A failed refresh must not disturb the answer
             // already being returned, and there is no one to report it to —
             // the user asked for a word, not for a cache maintenance job.
+            // `fresh &&` is load-bearing: fetchEntry resolves null on a
+            // transient failure (Bing interstitial, parser mismatch), and
+            // writing that null would replace a perfectly good cached entry
+            // with a negative one — exactly what the miss path below refuses
+            // to do on purpose.
             void fetchEntry(provider, word, targetLang)
-                .then((fresh) => writeDictCache(key, fresh))
+                .then((fresh) => { if (fresh) return writeDictCache(key, fresh); })
                 .catch(() => { /* keep the stale entry */ });
         }
         return cached.entry;

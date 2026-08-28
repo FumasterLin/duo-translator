@@ -2,7 +2,7 @@
 // Extracted from main/content.ts so the string logic is unit-testable in
 // isolation (no DOM, no config). content.ts reads config and feeds the values
 // in via buildTranslationCss().
-import { effectiveFontColor } from "@/utils/color";
+import { effectiveFontColor, parseHexColor } from "@/utils/color";
 import {
     BLUR_RADIUS_PX,
     DIM_OPACITY,
@@ -176,7 +176,31 @@ export function getHighlightCSSRuleString(style: string, color?: string): string
  * highlighting. Always returns a complete CSS string so the caller can swap the
  * stylesheet atomically via replaceSync.
  */
+/**
+ * Color values arrive from config storage, which a cloud-backup restore (or a
+ * hand-edited snapshot import) can fill with ARBITRARY strings — and every one
+ * of them is interpolated into a stylesheet applied to the page AND fanned out
+ * into every discovered page shadow root. A value like `red} body::before
+ * {background:url(//attacker/?)}` must never reach those template strings, so
+ * clamp each to the one family of formats our pickers can produce:
+ * `#rgb` / `#rrggbb`. Empty stays empty ("feature off").
+ */
+function safeColor(v: string): string {
+    const t = v?.trim?.() ?? "";
+    return parseHexColor(t) ? t : "";
+}
+
 export function buildTranslationCss(opts: TranslationCssOptions): string {
+    opts = {
+        ...opts,
+        bgColor: safeColor(opts.bgColor),
+        fontColor: safeColor(opts.fontColor),
+        borderColor: safeColor(opts.borderColor),
+        quoteBorderColor: safeColor(opts.quoteBorderColor),
+        highlightBg: safeColor(opts.highlightBg),
+        highlightFontColor: safeColor(opts.highlightFontColor),
+        highlightBorderColor: safeColor(opts.highlightBorderColor),
+    };
     const blocks: string[] = [];
 
     // Translation style — applied to the appended translation copy.

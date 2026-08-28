@@ -384,9 +384,15 @@ export async function getTranslateResult(
         if (pre.mappedHtmlText.trim() === "") continue;
         let text: string;
         if (service === TRANSLATE_SERVICE.GOOGLE) {
+            // Escape like the innerHTML path below gets for free: a source
+            // containing `<` or `&` used to produce malformed `<a i=0>a<b</a>`
+            // markup, Google's answer then mis-parsed in parseIndexedText and
+            // text landed on the page out of order.
+            const escapeHtml = (s: string) =>
+                s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
             text = "";
             for (let index = 0; index < pre.textNodes.length; index++) {
-                text += `<a i=${index}>${pre.sourceTexts[index]}</a>`
+                text += `<a i=${index}>${escapeHtml(pre.sourceTexts[index])}</a>`
             }
         } else {
             text = pre.mappedHtmlText;

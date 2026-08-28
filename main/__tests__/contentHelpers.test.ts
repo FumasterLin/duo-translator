@@ -7,7 +7,11 @@ import { describe, it, expect, vi, beforeEach, type Mock } from "vitest";
 
 // effectiveFontColor does a contrast calc; stub it to identity so the CSS
 // builder output is deterministic and we test *its* assembly logic, not colors.
-vi.mock("@/utils/color", () => ({
+// Partial mock: parseHexColor stays real because buildTranslationCss uses it to
+// clamp configured colors to valid hex (a full stub would silently disable
+// that clamping and change what these tests exercise).
+vi.mock("@/utils/color", async (importOriginal) => ({
+    ...(await importOriginal<typeof import("@/utils/color")>()),
     effectiveFontColor: (_bg: string, font: string) => font,
 }));
 vi.mock("franc", () => ({ franc: vi.fn() }));
